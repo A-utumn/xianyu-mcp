@@ -355,6 +355,17 @@ class XianyuPublish:
         await self.browser.page.goto(item_url, wait_until="networkidle", timeout=30000)
         await self.browser.page.wait_for_timeout(3000)
 
+    async def _ensure_personal_page(self) -> None:
+        """打开个人主页。"""
+        if not self.browser.page:
+            raise RuntimeError("浏览器未启动")
+
+        await self._ensure_cookies_loaded()
+        personal_url = "https://www.goofish.com/personal"
+        logger.info(f"打开个人主页：{personal_url}")
+        await self.browser.page.goto(personal_url, wait_until="networkidle", timeout=30000)
+        await self.browser.page.wait_for_timeout(3000)
+
     async def _first_visible_locator(self, selectors: List[str]):
         """返回第一个可见的定位器。"""
         if not self.browser.page:
@@ -523,6 +534,68 @@ class XianyuPublish:
             except Exception:
                 continue
         return False
+
+    def _extract_item_id(self, href: str) -> str:
+        """从商品链接中提取商品 ID。"""
+        match = re.search(r"[?&]id=(\d+)", href or "")
+        return match.group(1) if match else ""
+
+    def _parse_personal_item_card(self, raw_text: str, href: str) -> Dict[str, Any]:
+        """把个人主页商品卡片文本解析为结构化数据。"""
+        text = (raw_text or "").replace("\r", "\n").strip()
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        compact_text = " ".join(lines)
+
+        item_id = self._extract_item_id(href)
+        title = ""
+        price = None
+        wants = None
+        seller_name = ""
+
+        want_index = -1
+        for index, line in enumerate(lines):
+            if "人想要" in line:
+                want_index = index
+                digits = re.sub(r"[^\d]", "", line)
+                if digits:
+                    wants = int(digits)
+                break
+
+        price_match = re.search(r"[¥￥]?\s*(\d+(?:\s*\.\s*\d+)?)", compact_text)
+        if price_match:
+            try:
+                price = float(price_match.group(1).replace(" ", ""))
+            except ValueError:
+                price = None
+
+        def is_meta_line(line: str) -> bool:
+            normalized = line.replace("¥", "").replace("￥", "").replace(" ", "")
+            if "人想要" in line:
+                return True
+            if re.fullmatch(r"\d+(?:\.\d+)?", normalized):
+                return True
+            return normalized in {"", "."}
+
+        for line in lines:
+            if not is_meta_line(line):
+                title = line
+                break
+
+        if lines:
+            seller_name = lines[-1]
+            if seller_name == title:
+                seller_name = ""
+
+        return {
+            "item_id": item_id,
+            "title": title,
+            "price": price,
+            "want_count": wants,
+            "seller_name": seller_name,
+            "url": href,
+            "can_edit": bool(item_id),
+            "can_delete": bool(item_id),
+        }
     
     async def _upload_images(self, image_paths: List[str]) -> None:
         """上传图片"""
@@ -982,6 +1055,38 @@ class XianyuPublish:
         except Exception as e:
             logger.error(f"下架商品失败：{e}")
             return False, str(e)
+
+    async def list_my_items(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """列出个人主页中可管理的商品。"""
+        if not self.browser.page:
+            return []
+
+        try:
+            await self._ensure_personal_page()
+            raw_items = await self.browser.page.evaluate(
+                """() => Array.from(document.querySelectorAll("a[href*='/item?id=']")).map((a) => ({
+                    href: a.href || '',
+                    text: (a.innerText || '').trim(),
+                }))"""
+            )
+        except Exception as e:
+            logger.error(f"读取个人商品失败：{e}")
+            return []
+
+        items = []
+        seen_ids = set()
+        for raw_item in raw_items:
+            href = raw_item.get("href", "")
+            item = self._parse_personal_item_card(raw_item.get("text", ""), href)
+            item_id = item.get("item_id")
+            if not item_id or item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            items.append(item)
+            if len(items) >= max(limit, 1):
+                break
+
+        return items
     
     async def batch_publish(self, items: List[PublishParams]) -> List[tuple[bool, str]]:
         """

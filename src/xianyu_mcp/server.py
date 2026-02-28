@@ -206,6 +206,38 @@ async def publish_item(
 
 
 @mcp.tool()
+async def list_my_items(limit: int = 20) -> dict:
+    """
+    列出当前账号在个人主页可管理的商品
+
+    Args:
+        limit: 数量限制
+
+    Returns:
+        商品列表
+    """
+    from xianyu_mcp.xianyu.browser import XianyuBrowser
+    from xianyu_mcp.xianyu.publish import XianyuPublish
+
+    logger.info(f"获取可管理商品列表，limit={limit}")
+
+    browser = XianyuBrowser(headless=False)
+    try:
+        await browser.launch()
+        publish = XianyuPublish(browser)
+        items = await publish.list_my_items(limit=limit)
+        await browser.close()
+        return {
+            "success": True,
+            "count": len(items),
+            "items": items,
+        }
+    except Exception as e:
+        logger.error(f"获取可管理商品列表失败：{e}")
+        return {"success": False, "count": 0, "items": [], "message": str(e)}
+
+
+@mcp.tool()
 async def edit_item(
     item_id: str,
     updates: dict,
@@ -792,6 +824,7 @@ async def main_async():
     logger.info("    - search_items: 搜索商品")
     logger.info("  发布工具:")
     logger.info("    - publish_item: 发布商品")
+    logger.info("    - list_my_items: 获取可管理商品")
     logger.info("    - edit_item: 编辑商品")
     logger.info("    - delete_item: 下架/删除商品")
     logger.info("  消息工具:")
