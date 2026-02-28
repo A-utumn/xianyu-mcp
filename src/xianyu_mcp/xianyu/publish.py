@@ -7,9 +7,11 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from pathlib import Path
+import re
 from loguru import logger
 
 from .browser import XianyuBrowser
+from .login import XianyuLogin
 
 
 @dataclass
@@ -119,14 +121,14 @@ class PublishParams:
         template = f"""{self.description}
 
 【商品详情】
-✅ 新旧程度：{self.condition}
-✅ 配送方式：{self.delivery}
-✅ 所在地区：{self.location or '上海'}
+[商品状态] {self.condition}
+[配送方式] {self.delivery}
+[所在地区] {self.location or '上海'}
 
 【购买须知】
-📦 包邮发货，请放心购买
-💬 有任何问题欢迎咨询
-🤝 支持闲鱼担保交易
+[发货说明] 包邮发货，请放心购买
+[沟通说明] 有任何问题欢迎咨询
+[交易方式] 支持闲鱼担保交易
 """
         return template.strip()
 
@@ -142,6 +144,7 @@ class XianyuPublish:
             browser: 浏览器实例
         """
         self.browser = browser
+        self._cookies_loaded = False
         logger.info("发布模块已初始化")
     
     async def publish(self, params: PublishParams) -> tuple[bool, str]:
@@ -166,55 +169,7 @@ class XianyuPublish:
             return False, error_msg
         
         try:
-            # 1. 打开发布页面
-            publish_url = "https://www.goofish.com/publish"
-            logger.info(f"打开发布页面：{publish_url}")
-            await self.browser.page.goto(publish_url, wait_until="networkidle", timeout=30000)
-            await self.browser.page.wait_for_timeout(3000)
-            
-            # 2. 上传图片
-            logger.info("上传图片...")
-            await self._upload_images(params.images)
-            
-            # 3. 填写标题
-            logger.info("填写标题...")
-            await self._fill_title(params.title)
-            
-            # 4. 填写描述
-            logger.info("填写描述...")
-            await self._fill_description(params.description)
-            
-            # 5. 填写价格
-            logger.info("填写价格...")
-            await self._fill_price(params.price)
-            
-            # 6. 选择分类
-            if params.category:
-                logger.info("选择分类...")
-                await self._select_category(params.category)
-            
-            # 7. 选择地区
-            if params.location:
-                logger.info("选择地区...")
-                await self._select_location(params.location)
-            
-            # 8. 选择新旧程度
-            logger.info("选择新旧程度...")
-            await self._select_condition(params.condition)
-            
-            # 9. 选择配送方式
-            logger.info("选择配送方式...")
-            await self._select_delivery(params.delivery)
-            
-            # 10. 添加标签
-            if params.tags:
-                logger.info("添加标签...")
-                await self._add_tags(params.tags)
-            
-            # 11. 声明原创（如果需要）
-            if params.is_original:
-                logger.info("声明原创...")
-                await self._mark_original()
+            await self._prepare_publish_form(params)
             
             # 12. 提交发布
             logger.info("提交发布...")
@@ -232,108 +187,453 @@ class XianyuPublish:
             import traceback
             traceback.print_exc()
             return False, str(e)
+
+    async def precheck_publish(self, params: PublishParams) -> Dict[str, Any]:
+        """
+        试填发布表单并返回可发布性检查结果，不真正提交。
+
+        Args:
+            params: 发布参数
+
+        Returns:
+            预检查结果
+        """
+        logger.info(f"预检查发布商品：{params.title}")
+
+        if not self.browser.page:
+            return {
+                "success": False,
+                "ready_to_submit": False,
+                "message": "浏览器未启动",
+                "blockers": ["浏览器未启动"],
+            }
+
+        is_valid, error_msg = params.validate()
+        if not is_valid:
+            return {
+                "success": False,
+                "ready_to_submit": False,
+                "message": error_msg,
+                "blockers": [error_msg],
+            }
+
+        try:
+            await self._prepare_publish_form(params)
+            state = await self._inspect_publish_state()
+            state["success"] = True
+            return state
+        except Exception as e:
+            logger.error(f"预检查发布失败：{e}")
+            return {
+                "success": False,
+                "ready_to_submit": False,
+                "message": str(e),
+                "blockers": [str(e)],
+            }
+
+    async def _prepare_publish_form(self, params: PublishParams) -> None:
+        """按当前网页结构填充发布表单。"""
+        await self._ensure_publish_page()
+
+        logger.info("上传图片...")
+        await self._upload_images(params.images)
+
+        logger.info("填写标题...")
+        await self._fill_title(params.title)
+
+        logger.info("填写描述...")
+        await self._fill_description(params.generate_description(), title=params.title)
+
+        logger.info("填写价格...")
+        await self._fill_price(params.price)
+
+        if params.category:
+            logger.info("选择分类...")
+            await self._select_category(params.category)
+
+        if params.location:
+            logger.info("选择地区...")
+            await self._select_location(params.location)
+
+        logger.info("选择新旧程度...")
+        await self._select_condition(params.condition)
+
+        logger.info("选择配送方式...")
+        await self._select_delivery(params.delivery)
+
+        if params.tags:
+            logger.info("添加标签...")
+            await self._add_tags(params.tags)
+
+        if params.is_original:
+            logger.info("声明原创...")
+            await self._mark_original()
+
+    async def _inspect_publish_state(self) -> Dict[str, Any]:
+        """检查当前发布表单是否可提交。"""
+        submit_button = await self._first_visible_locator([
+            "button.publish-button--KBpTVopQ",
+            "[class*='publish-button']",
+            'button[type="submit"]',
+            'button:has-text("发布")',
+        ])
+        button_class = await submit_button.get_attribute("class") if submit_button else ""
+        button_text = (await submit_button.inner_text()).strip() if submit_button else ""
+        blockers = await self._get_publish_blockers()
+        blocker_flags = self._get_blocker_flags(blockers)
+        ready_to_submit = bool(submit_button) and "disabled" not in (button_class or "").lower() and not blockers
+
+        message = "可提交" if ready_to_submit else "当前表单仍不可提交"
+        if blockers:
+            message = "；".join(dict.fromkeys(blockers))
+
+        return {
+            "ready_to_submit": ready_to_submit,
+            "message": message,
+            "blockers": list(dict.fromkeys(blockers)),
+            "button_text": button_text,
+            "button_enabled": ready_to_submit if submit_button else False,
+            "web_publish_supported": not blocker_flags["requires_app"],
+            "requires_app": blocker_flags["requires_app"],
+            "emoji_blocked": blocker_flags["emoji_blocked"],
+            "category_unsupported": blocker_flags["category_unsupported"],
+        }
+
+    async def _ensure_publish_page(self) -> None:
+        """确保当前位于已登录的发布页。"""
+        if not self.browser.page:
+            raise RuntimeError("浏览器未启动")
+
+        if not self._cookies_loaded:
+            try:
+                login = XianyuLogin(self.browser)
+                self._cookies_loaded = await login.load_cookies()
+            except Exception as e:
+                logger.debug(f"加载发布页 Cookie 失败：{e}")
+                self._cookies_loaded = False
+
+        publish_url = "https://www.goofish.com/publish"
+        if "/publish" not in self.browser.page.url:
+            logger.info(f"打开发布页面：{publish_url}")
+            await self.browser.page.goto(publish_url, wait_until="networkidle", timeout=30000)
+            await self.browser.page.wait_for_timeout(3000)
+
+    async def _first_visible_locator(self, selectors: List[str]):
+        """返回第一个可见的定位器。"""
+        if not self.browser.page:
+            return None
+
+        for selector in selectors:
+            locator = self.browser.page.locator(selector)
+            count = await locator.count()
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if await candidate.is_visible():
+                        return candidate
+                except Exception:
+                    continue
+
+        return None
+
+    def _sanitize_publish_text(self, text: str) -> str:
+        """移除网页发布不支持的字符（如 emoji）。"""
+        # Goofish 网页发布会直接拦截 emoji，保守移除非 BMP 字符
+        return re.sub(r"[\U00010000-\U0010FFFF]", "", text)
+
+    def _get_blocker_flags(self, blockers: List[str]) -> Dict[str, bool]:
+        """把已知阻塞文案映射成结构化状态。"""
+        unique_blockers = set(blockers)
+        return {
+            "requires_app": "请使用闲鱼APP扫码继续发布" in unique_blockers,
+            "emoji_blocked": "商品描述不能包含emoji" in unique_blockers,
+            "category_unsupported": "网页版暂不支持发布此分类" in unique_blockers,
+        }
+
+    async def _click_locator(self, locator, wait_ms: int = 800) -> bool:
+        """尽量稳定地点击元素，依次尝试常规点击、强制点击和 JS 点击。"""
+        if not locator:
+            return False
+
+        click_attempts = (
+            {"timeout": 3000},
+            {"timeout": 3000, "force": True},
+        )
+        for kwargs in click_attempts:
+            try:
+                await locator.click(**kwargs)
+                if self.browser.page:
+                    await self.browser.page.wait_for_timeout(wait_ms)
+                return True
+            except Exception:
+                continue
+
+        try:
+            await locator.evaluate("(node) => node.click()")
+            if self.browser.page:
+                await self.browser.page.wait_for_timeout(wait_ms)
+            return True
+        except Exception:
+            return False
+
+    async def _get_publish_blockers(self) -> List[str]:
+        """收集当前发布页的显式阻塞提示。"""
+        if not self.browser.page:
+            return []
+
+        body_text = await self.browser.page.evaluate(
+            "() => document.body && document.body.innerText ? document.body.innerText : ''"
+        )
+        blockers = []
+
+        known_messages = [
+            "商品描述不能包含emoji",
+            "网页版暂不支持发布此分类",
+            "请使用闲鱼APP扫码继续发布",
+        ]
+        for message in known_messages:
+            if message in body_text:
+                blockers.append(message)
+
+        return blockers
     
     async def _upload_images(self, image_paths: List[str]) -> None:
         """上传图片"""
         if not self.browser.page:
             return
-        
-        # 找到上传按钮
-        upload_button = await self.browser.page.query_selector(
-            'input[type="file"], .upload-button, .add-image'
-        )
-        
-        if upload_button:
-            # 设置多个文件
+
+        upload_input = None
+        for selector in [
+            'input[type="file"]',
+            '.upload-button input[type="file"]',
+            '.add-image input[type="file"]',
+        ]:
+            locator = self.browser.page.locator(selector)
+            if await locator.count():
+                upload_input = locator.first
+                break
+
+        if upload_input:
             image_files = [str(Path(p).absolute()) for p in image_paths if Path(p).exists()]
-            if image_files:
-                await upload_button.set_input_files(image_files)
-                logger.info(f"已上传 {len(image_files)} 张图片")
-                await self.browser.page.wait_for_timeout(2000)  # 等待上传完成
+            if not image_files:
+                raise RuntimeError("没有可上传的图片文件")
+
+            await upload_input.set_input_files(image_files)
+            logger.info(f"已上传 {len(image_files)} 张图片")
+            await self.browser.page.wait_for_timeout(2500)
+
+            # 等待上传区发生变化，避免马上进入下一步
+            await self.browser.page.wait_for_timeout(1500)
+            return
+
+        raise RuntimeError("未找到图片上传控件")
     
     async def _fill_title(self, title: str) -> None:
         """填写标题"""
         if not self.browser.page:
             return
-        
-        title_input = await self.browser.page.query_selector(
-            'input[placeholder*="标题"], input[name="title"], .title-input'
-        )
-        
+
+        title_input = await self._first_visible_locator([
+            'input[placeholder*="标题"]',
+            'input[name="title"]',
+            '.title-input',
+        ])
+
         if title_input:
             await title_input.fill(title)
-    
-    async def _fill_description(self, description: str) -> None:
+            return
+
+        # 当前发布页主要依赖描述智能识别标题，没有独立标题输入框
+        logger.debug("当前发布页未发现独立标题输入框，将使用描述内容辅助生成标题")
+
+    async def _fill_description(self, description: str, title: str = "") -> None:
         """填写描述"""
         if not self.browser.page:
             return
-        
-        desc_input = await self.browser.page.query_selector(
-            'textarea[placeholder*="描述"], textarea[name="description"], .description-input'
-        )
-        
-        if desc_input:
-            await desc_input.fill(description)
+
+        final_text = self._sanitize_publish_text(description.strip())
+        if title and title not in final_text:
+            final_text = self._sanitize_publish_text(f"{title}\n{final_text}".strip())
+
+        desc_input = await self._first_visible_locator([
+            "div[contenteditable='true']",
+            "[class*='editor']",
+            'textarea[placeholder*="描述"]',
+            'textarea[name="description"]',
+            '.description-input',
+        ])
+
+        if not desc_input:
+            raise RuntimeError("未找到描述输入区域")
+
+        tag_name = await desc_input.evaluate("el => el.tagName")
+        if tag_name == "DIV":
+            await desc_input.click()
+            await self.browser.page.keyboard.press("Control+A")
+            await self.browser.page.keyboard.type(final_text)
+        else:
+            await desc_input.fill(final_text)
+
+        await self.browser.page.wait_for_timeout(500)
     
     async def _fill_price(self, price: float) -> None:
         """填写价格"""
         if not self.browser.page:
             return
-        
-        price_input = await self.browser.page.query_selector(
-            'input[placeholder*="价格"], input[name="price"], .price-input'
-        )
-        
-        if price_input:
-            await price_input.fill(str(price))
+
+        price_inputs = self.browser.page.locator("input.ant-input")
+        count = await price_inputs.count()
+        for index in range(count):
+            item = price_inputs.nth(index)
+            try:
+                if not await item.is_visible():
+                    continue
+                placeholder = await item.get_attribute("placeholder") or ""
+                if placeholder != "0.00":
+                    continue
+                await item.fill("")
+                await item.type(f"{price:.2f}".rstrip("0").rstrip("."))
+                await self.browser.page.wait_for_timeout(300)
+                return
+            except Exception:
+                continue
+
+        raise RuntimeError("未找到价格输入框")
     
     async def _select_category(self, category: str) -> None:
         """选择分类"""
         if not self.browser.page:
             return
-        
-        # TODO: 实现分类选择逻辑
-        logger.debug(f"选择分类：{category}")
+
+        # 当前页面由描述和图片智能识别属性，暂不强制失败
+        logger.debug(f"当前发布页未发现稳定分类入口，跳过手动分类：{category}")
     
     async def _select_location(self, location: str) -> None:
         """选择地区"""
         if not self.browser.page:
             return
-        
-        # TODO: 实现地区选择逻辑
-        logger.debug(f"选择地区：{location}")
+
+        trigger = await self._first_visible_locator([
+            "text=请选择地址",
+            "[class*='addressWrap']",
+            "[class*='address--']",
+        ])
+        if not trigger:
+            logger.debug("未找到地址选择入口，跳过地区设置")
+            return
+
+        if not await self._click_locator(trigger, wait_ms=1000):
+            logger.debug("点击地址选择入口失败，跳过地区设置")
+            return
+
+        search_input = await self._first_visible_locator([
+            "input[placeholder*='搜索地点']",
+            "input[placeholder*='搜索']",
+        ])
+        if search_input and location:
+            try:
+                await search_input.fill(location)
+                await self.browser.page.wait_for_timeout(1000)
+
+                suggestions = self.browser.page.locator(".auto-item")
+                suggestion_count = await suggestions.count()
+                if suggestion_count > 0:
+                    for index in range(suggestion_count):
+                        item = suggestions.nth(index)
+                        text = (await item.inner_text()).strip()
+                        if location in text or text in location:
+                            if await self._click_locator(item, wait_ms=1000):
+                                return
+                    if await self._click_locator(suggestions.nth(0), wait_ms=1000):
+                        return
+            except Exception as e:
+                logger.debug(f"搜索地区失败，改用附近地址：{e}")
+
+        options = self.browser.page.locator("[class*='addressItem']")
+        count = await options.count()
+        if count > 0:
+            # 优先点首个匹配项，否则点第一个附近地址
+            target = None
+            for index in range(count):
+                item = options.nth(index)
+                text = (await item.inner_text()).strip()
+                if location and location in text:
+                    target = item
+                    break
+            if target is None:
+                target = options.nth(0)
+            if await self._click_locator(target, wait_ms=1000):
+                return
+
+        logger.debug("地址弹窗中未找到可选地址")
     
     async def _select_condition(self, condition: str) -> None:
         """选择新旧程度"""
         if not self.browser.page:
             return
-        
-        # TODO: 实现新旧程度选择逻辑
-        logger.debug(f"选择新旧程度：{condition}")
+
+        # 当前发布页主表单未暴露稳定的新旧程度控件，先做最佳努力匹配
+        if condition:
+            locator = self.browser.page.locator(f"text={condition}")
+            if await locator.count():
+                try:
+                    await locator.first.click()
+                    await self.browser.page.wait_for_timeout(500)
+                    return
+                except Exception:
+                    pass
+        logger.debug(f"当前发布页未发现稳定新旧程度入口，跳过：{condition}")
     
     async def _select_delivery(self, delivery: str) -> None:
         """选择配送方式"""
         if not self.browser.page:
             return
-        
-        # TODO: 实现配送方式选择逻辑
-        logger.debug(f"选择配送方式：{delivery}")
+
+        normalized = delivery.strip()
+        mapping = {
+            "包邮": "包邮",
+            "按距离计费": "按距离计费",
+            "一口价": "一口价",
+            "无需邮寄": "无需邮寄",
+        }
+        target_text = mapping.get(normalized, "包邮")
+
+        radio = self.browser.page.locator(".ant-radio-wrapper").filter(has_text=target_text)
+        if await radio.count():
+            await radio.first.click()
+            await self.browser.page.wait_for_timeout(500)
+            return
+
+        logger.debug(f"未找到配送方式选项，保持默认：{target_text}")
     
     async def _add_tags(self, tags: List[str]) -> None:
         """添加标签"""
         if not self.browser.page:
             return
-        
-        # TODO: 实现标签添加逻辑
-        logger.debug(f"添加标签：{tags}")
+
+        # 当前发布页无稳定标签入口，先记录跳过
+        logger.debug(f"当前发布页未发现稳定标签入口，跳过：{tags}")
     
     async def _mark_original(self) -> None:
         """声明原创"""
         if not self.browser.page:
             return
-        
-        # TODO: 实现原创声明逻辑
-        logger.debug("声明原创")
+
+        switch_button = await self._first_visible_locator([
+            ".ant-switch",
+            "button.ant-switch",
+        ])
+        if switch_button:
+            try:
+                aria_checked = await switch_button.get_attribute("aria-checked")
+                if aria_checked != "true":
+                    await switch_button.click()
+                    await self.browser.page.wait_for_timeout(500)
+                return
+            except Exception:
+                pass
+
+        logger.debug("当前发布页未发现稳定原创开关，跳过")
     
     async def _submit_publish(self) -> tuple[bool, str]:
         """
@@ -347,34 +647,49 @@ class XianyuPublish:
         
         try:
             # 找到发布按钮
-            submit_button = await self.browser.page.query_selector(
-                'button[type="submit"], .submit-button, button:has-text("发布")'
-            )
-            
-            if submit_button:
-                # 点击发布
-                await submit_button.click()
-                await self.browser.page.wait_for_timeout(3000)
-                
-                # 检查发布结果
-                current_url = self.browser.page.url
-                
-                # 如果跳转到商品详情页，说明发布成功
-                if '/detail/' in current_url:
-                    # 提取商品 ID
-                    item_id = current_url.split('/detail/')[-1].split('?')[0]
-                    return True, item_id
-                
-                # 检查是否有错误提示
-                error_el = await self.browser.page.query_selector('.error-message, .toast-error')
-                if error_el:
-                    error_text = await error_el.inner_text()
+            submit_button = await self._first_visible_locator([
+                "button.publish-button--KBpTVopQ",
+                "[class*='publish-button']",
+                'button[type="submit"]',
+                'button:has-text("发布")',
+            ])
+
+            if not submit_button:
+                return False, "未找到发布按钮"
+
+            blockers = await self._get_publish_blockers()
+            if blockers:
+                return False, "；".join(dict.fromkeys(blockers))
+
+            button_class = await submit_button.get_attribute("class") or ""
+            if "disabled" in button_class.lower():
+                return False, "发布按钮仍处于禁用状态，请检查图片、描述、价格和地址是否已填写完整"
+
+            await submit_button.click()
+            await self.browser.page.wait_for_timeout(3000)
+
+            current_url = self.browser.page.url
+            match = re.search(r"[?&]id=(\d+)", current_url)
+            if match and "/item" in current_url:
+                return True, match.group(1)
+
+            if "/detail/" in current_url:
+                item_id = current_url.split('/detail/')[-1].split('?')[0]
+                return True, item_id
+
+            error_el = await self._first_visible_locator([
+                ".error-message",
+                ".toast-error",
+                ".ant-message-error",
+                ".ant-notification-notice-description",
+            ])
+            if error_el:
+                error_text = (await error_el.inner_text()).strip()
+                if error_text:
                     return False, error_text
-                
-                # 默认认为成功
-                return True, "published"
-            
-            return False, "未找到发布按钮"
+
+            # 保守返回：按钮可点但未识别到详情页，说明已触发提交
+            return True, "submitted"
             
         except Exception as e:
             return False, str(e)

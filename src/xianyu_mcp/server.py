@@ -133,7 +133,8 @@ async def publish_item(
     category: str = "",
     location: str = "",
     condition: str = "全新",
-    delivery: str = "包邮"
+    delivery: str = "包邮",
+    dry_run: bool = False,
 ) -> dict:
     """
     发布闲鱼商品
@@ -147,6 +148,7 @@ async def publish_item(
         location: 地区
         condition: 新旧程度
         delivery: 配送方式
+        dry_run: 是否仅预检查表单，不真正提交发布
         
     Returns:
         发布结果 {"success": bool, "item_id": str, "message": str}
@@ -184,7 +186,12 @@ async def publish_item(
             condition=condition,
             delivery=delivery
         )
-        
+
+        if dry_run:
+            result = await publish.precheck_publish(params)
+            await browser.close()
+            return result
+
         success, result = await publish.publish(params)
         await browser.close()
         
