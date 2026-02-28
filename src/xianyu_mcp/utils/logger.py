@@ -4,7 +4,6 @@
 
 from loguru import logger
 import sys
-from pathlib import Path
 
 from ..config import settings
 

@@ -44,6 +44,10 @@ user_data/
 .pytest_cache/
 .coverage
 htmlcov/
+test_report.json
+tests/*_results.json
+tests/search_result.json
+tests/*.html
 
 # OS
 .DS_Store

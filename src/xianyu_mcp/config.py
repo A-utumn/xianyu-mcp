@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # 超时配置
     timeout: int = 30  # 操作超时时间（秒）
     page_load_timeout: int = 60
+    im_verification_timeout: int = 90
     
     # 频率控制（秒）
     search_interval: float = 3.0
@@ -38,11 +39,11 @@ class Settings(BaseSettings):
     message_interval: float = 5.0
     
     # 闲鱼配置
-    xianyu_url: str = "https://2.taobao.com/"
+    xianyu_url: str = "https://www.goofish.com/"
     xianyu_mobile_url: str = "https://m.goofish.com/"
     
     class Config:
-        env_prefix = "XIANIU_"
+        env_prefix = "XIANYU_"
         env_file = ".env"
         env_file_encoding = "utf-8"
 

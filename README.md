@@ -1,197 +1,74 @@
-# 🐟 闲鱼 MCP
+# 闲鱼 MCP
 
-闲鱼 MCP 服务器 - 实现闲鱼商品搜索、发布、消息、数据的完全自动化
+基于 Playwright 的闲鱼自动化 MCP 服务，当前重点可用能力是搜索、登录状态检查、可发送会话筛选、消息发送/回读，以及基础商品分析。
 
-## ✨ 功能特性
+## 当前状态
 
-- 🔍 **商品搜索** - 关键词搜索、筛选条件、竞品监控
-- 📸 **商品发布** - 图文发布、批量上架、定时发布
-- 💬 **消息互动** - 自动回复、智能议价、订单通知
-- 📊 **数据分析** - 销售统计、流量分析、竞品报告
+- 搜索链路已按当前 `goofish.com` 页面结构修复，可返回真实商品结果。
+- MCP 入口可直接调用 `search_items`、`get_conversations`、`get_sendable_conversations`、`get_messages`、`send_message`。
+- 消息模块已支持会话来源标记、可发送会话排序、上下文预热和商品上下文回填。
+- 分析模块当前已支持真实商品统计和竞品分析；销售、流量、热门商品排行仍有部分 TODO。
+- 发布模块仍有部分 TODO，不建议当成完整生产能力使用。
 
-## 🚀 快速开始
-
-### 1. 安装依赖
+## 快速开始
 
 ```bash
-# 使用 uv（推荐）
 uv sync
-
-# 或使用 pip
-pip install -e .
-```
-
-### 2. 安装 Playwright 浏览器
-
-```bash
 playwright install chromium
-```
-
-### 3. 登录闲鱼
-
-```bash
-# 运行登录脚本
 python scripts/login.py
-```
-
-扫码登录后，Cookie 会自动保存到 `cookies/` 目录。
-
-### 4. 检查登录状态
-
-```bash
 python scripts/check_status.py
-```
-
-### 5. 启动 MCP 服务器
-
-```bash
 python src/xianyu_mcp/server.py
 ```
 
-## 📋 MCP 工具列表
+扫码登录后，Cookie 会保存在 `cookies/`。
 
-### 搜索工具
+## 配置
 
-- `search_items(keyword, price_min, price_max, location)` - 搜索商品
-- `get_competitor_prices(item_ids)` - 获取竞品价格
-- `get_hot_items(category, limit)` - 获取热门商品
+参考 `.env.example`，环境变量前缀为 `XIANYU_`。
 
-### 发布工具
-
-- `publish_item(title, description, price, images, category)` - 发布商品
-- `batch_publish(items)` - 批量发布
-- `update_item(item_id, updates)` - 修改商品
-- `delete_item(item_id)` - 下架商品
-
-### 消息工具
-
-- `get_messages(limit)` - 获取消息列表
-- `send_reply(user_id, content)` - 发送回复
-- `get_unread_count()` - 获取未读消息数
-
-### 数据工具
-
-- `get_item_stats(item_id)` - 获取商品数据
-- `get_sales_summary(days)` - 销售统计
-- `get_traffic_analysis(item_id)` - 流量分析
-
-## 📁 项目结构
-
-```
-xianyu-mcp/
-├── src/xianyu_mcp/          # 源代码
-│   ├── server.py            # MCP 服务器入口
-│   ├── xianyu/              # 闲鱼自动化核心
-│   │   ├── browser.py       # 浏览器管理
-│   │   ├── login.py         # 登录模块
-│   │   ├── search.py        # 搜索模块
-│   │   ├── publish.py       # 发布模块
-│   │   └── message.py       # 消息模块
-│   └── mcp_tools/           # MCP 工具定义
-├── scripts/                 # 辅助脚本
-│   ├── login.py             # 登录脚本
-│   └── check_status.py      # 检查状态
-├── cookies/                 # Cookie 存储（不上传）
-├── tests/                   # 测试用例
-└── examples/                # 使用示例
-```
-
-## ⚙️ 配置说明
-
-创建 `.env` 文件（参考 `.env.example`）：
+常用项：
 
 ```env
-# 浏览器配置
-XIANIU_HEADLESS=false
-XIANIU_BROWSER_PATH=
-
-# Cookie 配置
-XIANIU_COOKIE_FILE=./cookies/default.json
-
-# 日志配置
-LOG_LEVEL=INFO
-LOG_FILE=./logs/xianyu.log
+XIANYU_HEADLESS=false
+XIANYU_COOKIE_FILE=./cookies/default.json
+XIANYU_USER_DATA_DIR=./user_data
 ```
 
-## ⚠️ 注意事项
+## 主要工具
 
-### 1. 账号安全
-- 控制操作频率，避免被封号
-- 搜索间隔 > 3 秒
-- 发布间隔 > 30 秒
-- 不要用于商业化滥用
+- `search_items`: 搜索闲鱼商品
+- `check_server_status`: 检查 MCP 服务状态
+- `publish_item`: 发布商品（部分流程未完成）
+- `get_conversations`: 获取会话列表（支持 `sendable_only` / `context_only` 过滤）
+- `get_sendable_conversations`: 获取可发送会话（支持上下文预热）
+- `get_unread_messages`: 获取未读消息数
+- `get_messages`: 获取会话消息（返回 `source`、商品上下文等）
+- `send_message`: 发送消息
+- `get_item_analytics`: 获取单个商品的真实统计数据
+- `analyze_competitors`: 获取多个商品的竞品对比分析
 
-### 2. Cookie 管理
-- Cookie 存储在本地 `cookies/` 目录
-- 不要上传到 Git
-- 定期重新登录更新 Cookie
+## 测试
 
-### 3. 反爬措施
-- 使用真实浏览器指纹
-- 模拟人工操作延迟
-- 避免高频请求
-
-## 🧪 测试
+优先使用仓库内的脚本，而不是依赖 `pytest`：
 
 ```bash
-# 运行所有测试
-pytest tests/ -v
-
-# 运行特定测试
-pytest tests/test_search.py -v
+python tests/quick_test.py
+python tests/test_mcp_search.py
+python tests/test_precise_search.py
+python tests/test_message_tools.py
+python tests/test_analytics_tools.py
+python tests/test_all.py
 ```
 
-## 📝 使用示例
+测试脚本说明见 [tests/README.md](C:/Users/Administrator/.openclaw/workspace/xianyu-mcp/tests/README.md)。
 
-### 搜索商品
+## 目录
 
-```python
-from xianyu_mcp.xianyu.search import XianyuSearch
-from xianyu_mcp.xianyu.browser import XianyuBrowser
+- `src/xianyu_mcp/`: 主代码
+- `scripts/`: 登录和状态检查脚本
+- `tests/`: 保留的手动测试脚本
+- `examples/`: 示例
 
-browser = XianyuBrowser()
-await browser.launch()
-search = XianyuSearch(browser)
+## 说明
 
-items = await search.search("iPhone 15", {
-    "price_min": 3000,
-    "price_max": 5000,
-    "location": "上海"
-})
-
-for item in items:
-    print(f"{item.title} - ¥{item.price}")
-
-await browser.close()
-```
-
-### 发布商品
-
-```python
-from xianyu_mcp.xianyu.publish import XianyuPublish, PublishParams
-
-params = PublishParams(
-    title="iPhone 15 Pro 256G 99 新",
-    description="自用 iPhone，无划痕，电池 95%",
-    price=6500,
-    images=["./photos/iphone1.jpg", "./photos/iphone2.jpg"],
-    category="手机数码",
-    location="上海"
-)
-
-publish = XianyuPublish(browser)
-item_id = await publish.publish(params)
-print(f"发布成功！商品 ID: {item_id}")
-```
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 📄 许可证
-
-MIT License
-
-## ⚠️ 免责声明
-
-本项目仅供学习交流使用，请勿用于非法用途。使用本项目造成的任何后果由使用者自行承担。
+本项目仅供学习和自动化研究使用。请自行控制访问频率，并遵守目标平台规则。
