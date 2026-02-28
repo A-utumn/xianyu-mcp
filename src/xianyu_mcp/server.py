@@ -205,6 +205,97 @@ async def publish_item(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+async def edit_item(
+    item_id: str,
+    updates: dict,
+    dry_run: bool = False,
+) -> dict:
+    """
+    编辑已发布商品
+
+    Args:
+        item_id: 商品 ID
+        updates: 更新内容，可包含 title/description/price/location/condition/delivery/images
+        dry_run: 是否仅试填，不真正提交
+
+    Returns:
+        编辑结果
+    """
+    from xianyu_mcp.xianyu.browser import XianyuBrowser
+    from xianyu_mcp.xianyu.publish import XianyuPublish
+
+    logger.info(f"编辑商品：{item_id}")
+
+    if not item_id:
+        return {"success": False, "message": "商品 ID 不能为空"}
+
+    if not isinstance(updates, dict) or not updates:
+        return {"success": False, "message": "updates 必须是非空对象"}
+
+    browser = XianyuBrowser(headless=False)
+    try:
+        await browser.launch()
+        publish = XianyuPublish(browser)
+        success, result = await publish.edit_item(item_id, updates, dry_run=dry_run)
+        await browser.close()
+
+        if not success:
+            return {"success": False, "message": result}
+
+        if dry_run and isinstance(result, dict):
+            return result
+
+        return {"success": True, "item_id": result, "message": "编辑成功"}
+    except Exception as e:
+        logger.error(f"编辑商品失败：{e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+async def delete_item(
+    item_id: str,
+    force_delete: bool = False,
+    dry_run: bool = False,
+) -> dict:
+    """
+    下架商品（默认）或在明确允许时删除商品
+
+    Args:
+        item_id: 商品 ID
+        force_delete: 当无法下架时是否尝试删除
+        dry_run: 是否仅检查按钮和确认弹窗，不真正执行
+
+    Returns:
+        处理结果
+    """
+    from xianyu_mcp.xianyu.browser import XianyuBrowser
+    from xianyu_mcp.xianyu.publish import XianyuPublish
+
+    logger.info(f"下架商品：{item_id}")
+
+    if not item_id:
+        return {"success": False, "message": "商品 ID 不能为空"}
+
+    browser = XianyuBrowser(headless=False)
+    try:
+        await browser.launch()
+        publish = XianyuPublish(browser)
+        success, result = await publish.delete_item(
+            item_id,
+            force_delete=force_delete,
+            dry_run=dry_run,
+        )
+        await browser.close()
+
+        if success:
+            return {"success": True, "item_id": item_id, "message": result}
+        return {"success": False, "message": result}
+    except Exception as e:
+        logger.error(f"下架商品失败：{e}")
+        return {"success": False, "message": str(e)}
+
+
 # ============== 消息工具 ==============
 
 @mcp.tool()
@@ -701,6 +792,8 @@ async def main_async():
     logger.info("    - search_items: 搜索商品")
     logger.info("  发布工具:")
     logger.info("    - publish_item: 发布商品")
+    logger.info("    - edit_item: 编辑商品")
+    logger.info("    - delete_item: 下架/删除商品")
     logger.info("  消息工具:")
     logger.info("    - get_conversations: 获取会话列表")
     logger.info("    - get_sendable_conversations: 获取可发送会话")

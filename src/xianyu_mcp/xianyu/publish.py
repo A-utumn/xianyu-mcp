@@ -299,24 +299,61 @@ class XianyuPublish:
             "category_unsupported": blocker_flags["category_unsupported"],
         }
 
+    async def _ensure_cookies_loaded(self) -> None:
+        """确保已尝试加载登录 Cookie。"""
+        if not self.browser.page:
+            raise RuntimeError("浏览器未启动")
+
+        if self._cookies_loaded:
+            return
+
+        try:
+            login = XianyuLogin(self.browser)
+            self._cookies_loaded = await login.load_cookies()
+        except Exception as e:
+            logger.debug(f"加载 Cookie 失败：{e}")
+            self._cookies_loaded = False
+
     async def _ensure_publish_page(self) -> None:
         """确保当前位于已登录的发布页。"""
         if not self.browser.page:
             raise RuntimeError("浏览器未启动")
 
-        if not self._cookies_loaded:
-            try:
-                login = XianyuLogin(self.browser)
-                self._cookies_loaded = await login.load_cookies()
-            except Exception as e:
-                logger.debug(f"加载发布页 Cookie 失败：{e}")
-                self._cookies_loaded = False
+        await self._ensure_cookies_loaded()
 
         publish_url = "https://www.goofish.com/publish"
         if "/publish" not in self.browser.page.url:
             logger.info(f"打开发布页面：{publish_url}")
             await self.browser.page.goto(publish_url, wait_until="networkidle", timeout=30000)
             await self.browser.page.wait_for_timeout(3000)
+
+    async def _ensure_edit_page(self, item_id: str) -> None:
+        """打开指定商品的编辑页。"""
+        if not self.browser.page:
+            raise RuntimeError("浏览器未启动")
+
+        await self._ensure_cookies_loaded()
+        edit_url = f"https://www.goofish.com/publish?itemId={item_id}"
+        logger.info(f"打开编辑页面：{edit_url}")
+        await self.browser.page.goto(edit_url, wait_until="networkidle", timeout=30000)
+        await self.browser.page.wait_for_timeout(3000)
+
+        body_text = await self.browser.page.evaluate(
+            "() => document.body && document.body.innerText ? document.body.innerText : ''"
+        )
+        if "商品不存在" in body_text or "宝贝不存在" in body_text:
+            raise RuntimeError("未找到可编辑的商品")
+
+    async def _ensure_item_page(self, item_id: str) -> None:
+        """打开指定商品详情页。"""
+        if not self.browser.page:
+            raise RuntimeError("浏览器未启动")
+
+        await self._ensure_cookies_loaded()
+        item_url = f"https://www.goofish.com/item?id={item_id}"
+        logger.info(f"打开商品详情页：{item_url}")
+        await self.browser.page.goto(item_url, wait_until="networkidle", timeout=30000)
+        await self.browser.page.wait_for_timeout(3000)
 
     async def _first_visible_locator(self, selectors: List[str]):
         """返回第一个可见的定位器。"""
@@ -325,6 +362,24 @@ class XianyuPublish:
 
         for selector in selectors:
             locator = self.browser.page.locator(selector)
+            count = await locator.count()
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if await candidate.is_visible():
+                        return candidate
+                except Exception:
+                    continue
+
+        return None
+
+    async def _first_visible_text_locator(self, texts: List[str]):
+        """返回第一个可见的文本定位器。"""
+        if not self.browser.page:
+            return None
+
+        for text in texts:
+            locator = self.browser.page.locator(f"text={text}")
             count = await locator.count()
             for index in range(count):
                 candidate = locator.nth(index)
@@ -396,6 +451,78 @@ class XianyuPublish:
                 blockers.append(message)
 
         return blockers
+
+    async def _read_current_description(self) -> str:
+        """读取当前编辑器中的描述文本。"""
+        if not self.browser.page:
+            return ""
+
+        desc_input = await self._first_visible_locator([
+            "div[contenteditable='true']",
+            "[class*='editor']",
+            'textarea[placeholder*="描述"]',
+            'textarea[name="description"]',
+            '.description-input',
+        ])
+        if not desc_input:
+            return ""
+
+        try:
+            tag_name = await desc_input.evaluate("el => el.tagName")
+            if tag_name == "DIV":
+                return (
+                    await desc_input.evaluate(
+                        "(el) => (el.innerText || el.textContent || '').trim()"
+                    )
+                ).strip()
+            value = await desc_input.input_value()
+            return value.strip()
+        except Exception:
+            return ""
+
+    async def _find_action_button(self, labels: List[str]):
+        """在卖家操作区里寻找按钮。"""
+        if not self.browser.page:
+            return None
+
+        containers = [
+            self.browser.page.locator("[class*='sellerButtonGroup']"),
+            self.browser.page.locator("[class*='buttons']"),
+            self.browser.page.locator("[class*='item-main-container']"),
+        ]
+        for container in containers:
+            try:
+                if not await container.count():
+                    continue
+                for label in labels:
+                    candidate = container.locator(f"text={label}")
+                    if await candidate.count():
+                        for index in range(await candidate.count()):
+                            button = candidate.nth(index)
+                            if await button.is_visible():
+                                return button
+            except Exception:
+                continue
+
+        return await self._first_visible_text_locator(labels)
+
+    async def _confirm_modal(self, confirm_text: str = "确定") -> bool:
+        """确认当前弹窗。"""
+        if not self.browser.page:
+            return False
+
+        for selector in [
+            f".ant-modal-root button:has-text('{confirm_text}')",
+            f".ant-modal-content button:has-text('{confirm_text}')",
+            f"button:has-text('{confirm_text}')",
+        ]:
+            locator = self.browser.page.locator(selector)
+            try:
+                if await locator.count() and await locator.first.is_visible():
+                    return await self._click_locator(locator.first, wait_ms=1200)
+            except Exception:
+                continue
+        return False
     
     async def _upload_images(self, image_paths: List[str]) -> None:
         """上传图片"""
@@ -694,34 +821,167 @@ class XianyuPublish:
         except Exception as e:
             return False, str(e)
     
-    async def edit_item(self, item_id: str, updates: Dict[str, Any]) -> tuple[bool, str]:
+    async def edit_item(
+        self,
+        item_id: str,
+        updates: Dict[str, Any],
+        dry_run: bool = False,
+    ) -> tuple[bool, Any]:
         """
         编辑商品
         
         Args:
             item_id: 商品 ID
             updates: 更新内容
+            dry_run: 是否仅试填，不提交
             
         Returns:
             (是否成功，消息)
         """
         logger.info(f"编辑商品 {item_id}")
-        # TODO: 实现编辑逻辑
-        return False, "功能开发中"
+        if not self.browser.page:
+            return False, "浏览器未启动"
+
+        if not item_id:
+            return False, "商品 ID 不能为空"
+
+        if not updates:
+            return False, "至少需要提供一项更新内容"
+
+        try:
+            await self._ensure_edit_page(item_id)
+
+            pending_description = updates.get("description")
+            pending_title = updates.get("title")
+
+            if updates.get("images"):
+                logger.info("更新图片...")
+                await self._upload_images(updates["images"])
+
+            if pending_title and not pending_description:
+                current_description = await self._read_current_description()
+                pending_description = current_description or pending_title
+
+            if pending_description is not None:
+                logger.info("更新描述...")
+                await self._fill_description(str(pending_description), title=str(pending_title or ""))
+            elif pending_title:
+                logger.info("更新标题...")
+                await self._fill_title(str(pending_title))
+
+            if "price" in updates and updates["price"] is not None:
+                logger.info("更新价格...")
+                await self._fill_price(float(updates["price"]))
+
+            if updates.get("location"):
+                logger.info("更新地区...")
+                await self._select_location(str(updates["location"]))
+
+            if updates.get("condition"):
+                logger.info("更新新旧程度...")
+                await self._select_condition(str(updates["condition"]))
+
+            if updates.get("delivery"):
+                logger.info("更新配送方式...")
+                await self._select_delivery(str(updates["delivery"]))
+
+            if "tags" in updates and updates.get("tags"):
+                logger.info("更新标签...")
+                await self._add_tags(list(updates["tags"]))
+
+            if updates.get("is_original"):
+                logger.info("更新原创声明...")
+                await self._mark_original()
+
+            if dry_run:
+                state = await self._inspect_publish_state()
+                state["success"] = True
+                state["item_id"] = item_id
+                state["mode"] = "edit"
+                return True, state
+
+            logger.info("提交编辑...")
+            success, result = await self._submit_publish()
+            if not success:
+                return False, result
+            return True, item_id if result == "submitted" else result
+        except Exception as e:
+            logger.error(f"编辑商品失败：{e}")
+            return False, str(e)
     
-    async def delete_item(self, item_id: str) -> tuple[bool, str]:
+    async def delete_item(
+        self,
+        item_id: str,
+        force_delete: bool = False,
+        dry_run: bool = False,
+    ) -> tuple[bool, str]:
         """
         下架商品
         
         Args:
             item_id: 商品 ID
+            force_delete: 当无法下架时是否尝试删除
+            dry_run: 是否仅检查按钮和确认弹窗，不真正执行
             
         Returns:
             (是否成功，消息)
         """
         logger.info(f"下架商品 {item_id}")
-        # TODO: 实现下架逻辑
-        return False, "功能开发中"
+        if not self.browser.page:
+            return False, "浏览器未启动"
+
+        if not item_id:
+            return False, "商品 ID 不能为空"
+
+        try:
+            await self._ensure_item_page(item_id)
+
+            action_button = await self._find_action_button(["下架"])
+            action_name = "下架"
+
+            if not action_button and force_delete:
+                action_button = await self._find_action_button(["删除"])
+                action_name = "删除"
+
+            if not action_button:
+                if await self._find_action_button(["删除"]):
+                    return False, "当前商品未找到“下架”按钮，可能已下架；如需彻底删除请设置 force_delete=True"
+                return False, "未找到可用的下架按钮"
+
+            if not await self._click_locator(action_button, wait_ms=1000):
+                return False, f"点击“{action_name}”按钮失败"
+
+            body_text = await self.browser.page.evaluate(
+                "() => document.body && document.body.innerText ? document.body.innerText : ''"
+            )
+            if "确定要下架这个宝贝吗" in body_text or "确定要删除这个宝贝吗" in body_text:
+                if dry_run:
+                    cancel_button = await self._first_visible_text_locator(["取消"])
+                    if cancel_button:
+                        await self._click_locator(cancel_button, wait_ms=600)
+                    return True, f"已定位“{action_name}”确认弹窗"
+                if not await self._confirm_modal("确定"):
+                    return False, f"未找到“{action_name}”确认按钮"
+            elif dry_run:
+                return True, f"已定位“{action_name}”按钮"
+
+            await self.browser.page.wait_for_timeout(3000)
+
+            refreshed_text = await self.browser.page.evaluate(
+                "() => document.body && document.body.innerText ? document.body.innerText : ''"
+            )
+
+            if action_name == "下架":
+                if "确定要下架这个宝贝吗" in refreshed_text:
+                    return False, "下架确认后页面仍停留在确认弹窗，可能未执行成功"
+                return True, "商品已下架"
+
+            if "确定要删除这个宝贝吗" in refreshed_text:
+                return False, "删除确认后页面仍停留在确认弹窗，可能未执行成功"
+            return True, "商品已删除"
+        except Exception as e:
+            logger.error(f"下架商品失败：{e}")
+            return False, str(e)
     
     async def batch_publish(self, items: List[PublishParams]) -> List[tuple[bool, str]]:
         """
